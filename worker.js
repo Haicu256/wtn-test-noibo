@@ -1,3 +1,4 @@
+import { Buffer } from 'node:buffer';
 
 const SHARE_TTL_SECONDS = 60 * 60 * 24 * 90;
 const SHARE_RENEW_AFTER_SECONDS = 60 * 60 * 24 * 30;
@@ -10,7 +11,7 @@ const IMAGE_ID_REGEX = /^[0-9a-f]{12}$/;
 const MAX_IMAGE_BYTES = 300_000;
 const MAX_SHARE_IMAGE_BYTES = 2_000_000;
 const MAX_SHARE_IMAGES = 100;
-// Luật vòng đời trên kho xoá hình 91 ngày sau lần ghi cuối; hình ghi trong vòng 1 ngày thì không cần ghi lại.
+// Luật vòng đời trên kho xoá hình 92 ngày sau lần ghi cuối; hình ghi trong vòng 1 ngày thì không cần ghi lại.
 const IMAGE_REFRESH_AFTER_MS = 24 * 3600 * 1000;
 const CSP_POLICY = "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com; font-src https://fonts.gstatic.com https://cdnjs.cloudflare.com; media-src 'self'; connect-src 'self'; worker-src 'self' blob: https://cdnjs.cloudflare.com; img-src 'self' data:; frame-ancestors 'none';";
 
@@ -796,12 +797,10 @@ async function storeShareImages(text, images, env) {
     let total = 0;
     for (const id of ids) {
         if (typeof given[id] !== 'string') continue;
-        let bytes;
-        try {
-            bytes = Uint8Array.from(atob(given[id]), ch => ch.charCodeAt(0));
-        } catch {
-            return { error: jsonResponse({ error: 'Hình không đúng định dạng.' }, 400) };
-        }
+        // Buffer (nodejs_compat) giải base64 nhanh hơn Uint8Array.from(atob) hàng trăm lần (2 MB: ~2 ms so với ~0,5 s CPU).
+        // Ký tự rác bị bỏ qua, nhưng kiểm loại hình và mã băm phía sau vẫn chặn byte sai.
+        if (!/^[A-Za-z0-9+/]*={0,2}$/.test(given[id])) return { error: jsonResponse({ error: 'Hình không đúng định dạng.' }, 400) };
+        const bytes = new Uint8Array(Buffer.from(given[id], 'base64'));
         if (bytes.length > MAX_IMAGE_BYTES) return { error: jsonResponse({ error: 'Hình quá lớn (tối đa 300 KB mỗi hình).' }, 413) };
         total += bytes.length;
         if (total > MAX_SHARE_IMAGE_BYTES) return { error: jsonResponse({ error: 'Tổng dung lượng hình quá lớn (tối đa 2 MB mỗi đề).' }, 413) };
@@ -819,9 +818,10 @@ async function storeShareImages(text, images, env) {
         for (const id of ids) {
             const head = heads.get(id);
             if (head && Date.now() - new Date(head.uploaded).getTime() < IMAGE_REFRESH_AFTER_MS) continue;
-            const item = decoded.get(id);
-            if (item) await env.IMAGES.put(`img/${id}`, item.bytes, { httpMetadata: { contentType: item.type } });
-            else await rewriteImage(env, `img/${id}`);
+            // Mã đã có trong kho: chỉ ghi lại đúng byte trong kho, không bao giờ ghi byte trình duyệt gửi (mã 48 bit có thể bị
+            // dò trùng để thay hình của đề khác).
+            if (head) await rewriteImage(env, `img/${id}`);
+            else await env.IMAGES.put(`img/${id}`, decoded.get(id).bytes, { httpMetadata: { contentType: decoded.get(id).type } });
         }
     } catch (err) {
         console.error('R2 image error:', err);
@@ -830,7 +830,7 @@ async function storeShareImages(text, images, env) {
     return {};
 }
 
-// Gia hạn hình của đề (ghi lại để đặt lại hạn 91 ngày). Thiếu hình hay R2 lỗi → false (không gia hạn đề).
+// Gia hạn hình của đề (ghi lại để đặt lại hạn 92 ngày). Thiếu hình hay R2 lỗi → false (không gia hạn đề).
 async function refreshImages(text, env) {
     if (!env.IMAGES) return false;
     try {

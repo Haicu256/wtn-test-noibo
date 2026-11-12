@@ -631,7 +631,7 @@ D. Giá trị nhỏ nhất của hàm số bằng 1
                     // Không ghép được: nếu ngay sau loạt là câu mới, dòng đáp án hay hết thì mỗi chữ cái thành phương án giữ chỗ
                     // (chữ cái đứng một mình sẽ bị parser nối với dòng sau, làm câu sau dính vào câu này); còn lại giữ nguyên.
                     const next = stripFormattingTags(lines[j] || '').trim();
-                    const ends = next === '' || /^(?:(?:câu\s*hỏi\s*đúng\s*sai\s*:\s*)?(?:câu|question|bài)\s*\d+|\d+\s*[.:)\/]\s|đáp\s*án|chọn|lời\s*giải)/iu.test(next);
+                    const ends = run.some(r => r.ids) && (next === '' || /^(?:(?:câu\s*hỏi\s*đúng\s*sai\s*:\s*)?(?:câu|question|bài)\s*\d+|\d+\s*[.:)\/]\s|đáp\s*án|chọn|lời\s*giải)/iu.test(next));
                     lines.slice(i, j).forEach((line, n) => {
                         if (ends && run[n].letters) out.push(...run[n].letters.map(letter => `${letter}. ${UNPAIRED_IMAGE_TEXT}`));
                         else out.push(line);
@@ -670,10 +670,15 @@ D. Giá trị nhỏ nhất của hàm số bằng 1
             for (let s = 0; s + 1 < bounds.length; s++) {
                 const [top, bottom] = [bounds[s], bounds[s + 1]];
                 const imgs = images.filter(img => center(img) < top && center(img) > bottom);
-                const letterIdx = lines.map((l, i) => i).filter(i => !starts.includes(i) && isLetterLine(lines[i]) && yOf(lines[i]) < top && yOf(lines[i]) > bottom);
-                if (!imgs.length || !letterIdx.length) continue;
-                const letters = letterIdx.flatMap(i => solid(lines[i]).map(it => ({ x: it.x, y: it.y, letter: it.s.replace(/[^A-F]/g, '') })));
+                if (!imgs.length) continue;
                 const tol = Math.max(8, Math.min(...imgs.map(img => img.h)) / 2);
+                // Chỉ chữ cái nằm trong dải chiều cao của lưới hình mới là nhãn của hình (bảng đáp án "B A A" bên dưới thì không).
+                const lo = Math.min(...imgs.map(img => img.y)) - tol;
+                const hi = Math.max(...imgs.map(img => img.y + img.h)) + tol;
+                const letterIdx = lines.map((l, i) => i).filter(i => !starts.includes(i) && isLetterLine(lines[i]) && yOf(lines[i]) < top && yOf(lines[i]) > bottom
+                    && yOf(lines[i]) >= lo && yOf(lines[i]) <= hi);
+                if (!letterIdx.length) continue;
+                const letters = letterIdx.flatMap(i => solid(lines[i]).map(it => ({ x: it.x, y: it.y, letter: it.s.replace(/[^A-F]/g, '') })));
                 const imgRows = rowsOf(imgs, center, tol);
                 const letterRows = rowsOf(letters, it => it.y, tol);
                 const order = letterRows.flat().map(it => it.letter).join('');
@@ -712,23 +717,33 @@ D. Giá trị nhỏ nhất của hàm số bằng 1
 
         // Hình của một trang PDF: vị trí lấy từ ma trận hiện hành lúc vẽ (paintImageXObject), điểm ảnh từ page.objs. Hình
         // nhỏ hơn 8 pt (đường kẻ, chấm trang trí) bỏ qua.
-        async function readPdfPageImages(page) {
+        // Vị trí từng hình theo ma trận hiện hành lúc vẽ. Form XObject (PDF in "vừa trang", 2 trang một tờ) mang ma trận riêng
+        // trong tham số của paintFormXObjectBegin; bỏ qua thì hình lệch sang hệ toạ độ khác chữ và rơi vào câu khác.
+        function imageBoxesFromOps(ops, O) {
+            const mul = (m, n) => [m[0] * n[0] + m[2] * n[1], m[1] * n[0] + m[3] * n[1], m[0] * n[2] + m[2] * n[3], m[1] * n[2] + m[3] * n[3], m[0] * n[4] + m[2] * n[5] + m[4], m[1] * n[4] + m[3] * n[5] + m[5]];
             const found = [];
+            let ctm = [1, 0, 0, 1, 0, 0];
+            const stack = [];
+            for (let i = 0; i < ops.fnArray.length; i++) {
+                const op = ops.fnArray[i];
+                const args = ops.argsArray[i];
+                if (op === O.save) stack.push(ctm);
+                else if (op === O.restore) ctm = stack.pop() || ctm;
+                else if (op === O.transform) ctm = mul(ctm, args);
+                else if (op === O.paintFormXObjectBegin) {
+                    stack.push(ctm);
+                    if (Array.isArray(args && args[0]) && args[0].length === 6) ctm = mul(ctm, args[0]);
+                } else if (op === O.paintFormXObjectEnd) ctm = stack.pop() || ctm;
+                else if (op === O.paintImageXObject) found.push({ name: args[0], box: ctm });
+                else if (op === O.paintInlineImageXObject) found.push({ data: args[0], box: ctm });
+            }
+            return found;
+        }
+
+        async function readPdfPageImages(page) {
+            let found;
             try {
-                const ops = await page.getOperatorList();
-                const O = pdfjsLib.OPS;
-                const mul = (m, n) => [m[0] * n[0] + m[2] * n[1], m[1] * n[0] + m[3] * n[1], m[0] * n[2] + m[2] * n[3], m[1] * n[2] + m[3] * n[3], m[0] * n[4] + m[2] * n[5] + m[4], m[1] * n[4] + m[3] * n[5] + m[5]];
-                let ctm = [1, 0, 0, 1, 0, 0];
-                const stack = [];
-                for (let i = 0; i < ops.fnArray.length; i++) {
-                    const op = ops.fnArray[i];
-                    const args = ops.argsArray[i];
-                    if (op === O.save) stack.push(ctm);
-                    else if (op === O.restore) ctm = stack.pop() || ctm;
-                    else if (op === O.transform) ctm = mul(ctm, args);
-                    else if (op === O.paintImageXObject) found.push({ name: args[0], box: ctm });
-                    else if (op === O.paintInlineImageXObject) found.push({ data: args[0], box: ctm });
-                }
+                found = imageBoxesFromOps(await page.getOperatorList(), pdfjsLib.OPS);
             } catch (e) {
                 return [];
             }
@@ -2477,7 +2492,7 @@ D. Giá trị nhỏ nhất của hàm số bằng 1
             });
 
             // Câu mà hình chưa ghép được với phương án (thầy cô chưa sửa trong ô kết quả): bỏ, không cho học sinh làm câu hỏng.
-            const unpairedImageQs = parsedQuestions.filter(q => q.options.some(o => stripFormattingTags(String(o.text)).trim() === UNPAIRED_IMAGE_TEXT));
+            const unpairedImageQs = parsedQuestions.filter(q => q.options.some(o => stripFormattingTags(String(o.text)).includes(UNPAIRED_IMAGE_TEXT)));
             const validQuestions = parsedQuestions.filter(q => q.options.length >= 2 && !unpairedImageQs.includes(q));
             const droppedNoOptionCount = parsedQuestions.filter(q => q.options.length < 2 && !unpairedImageQs.includes(q)).length;
             // Câu đúng/sai phải có bằng chứng (dấu * hoặc dòng/bảng đáp án như "Đáp án: SSSS"); không có thì bỏ như câu

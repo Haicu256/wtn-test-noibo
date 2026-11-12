@@ -37,7 +37,7 @@ kiểm tra ngay trên web thật sau khi deploy; lỗi thì `git revert` và pus
 - Secret (giá trị chỉ có trên Cloudflare): `GEMINI_API_KEY`, `CF_AIG_TOKEN`. `secrets.required` chỉ được liệt kê secret đã tạo, thiếu là deploy lỗi.
 - `vars` trong `wrangler.jsonc`: `CF_AIG_ACCOUNT_ID`, `GEMINI_MODEL`. File này là nơi quyết định; sửa trên dashboard sẽ bị ghi đè ở lần deploy sau (`keep_vars: true` chỉ giữ biến *không* có trong file).
 - KV `SHARES` phải dùng ID thật. Một ID giả từng làm mọi bản build hỏng từ 25/10 đến 6/11/2026.
-- R2 `IMAGES` (kho `wtn-images`) giữ hình của đề chia sẻ, khoá `img/<mã>`. Kho phải có trước khi deploy (thiếu là build hỏng). Trên dashboard đặt luật vòng đời xoá đối tượng 91 ngày sau lần ghi cuối; worker ghi lại hình mỗi khi tạo hay gia hạn link (xem `docs/thiet-ke/hinh-anh.md`).
+- R2 `IMAGES` (kho `wtn-images`) giữ hình của đề chia sẻ, khoá `img/<mã>`. Nên tạo kho trên dashboard trước khi deploy. Kho chưa có thì wrangler 4.151 tự tạo kho đúng tên này lúc deploy (cần token build có quyền R2 và tài khoản đã bật R2); tạo không được thì build hỏng và web giữ bản cũ. Kho tự tạo không có luật xoá. Trên dashboard đặt luật vòng đời xoá đối tượng 92 ngày sau lần ghi cuối; worker ghi lại hình mỗi khi tạo hay gia hạn link (xem `docs/thiet-ke/hinh-anh.md`).
 - `USProxy` (Durable Object, `locationHint: wnam`) giữ mọi lệnh gọi Gemini đi từ Mỹ, vì gọi từ Hong Kong từng bị lỗi. Không bỏ.
 - Model `gemini-3.1-flash-lite` (Google tắt sớm nhất 7/5/2027). Worker chọn `temperature` và `thinkingConfig` theo tiền tố tên model, nên khi đổi model phải xem lại đoạn đó và test trong `tests/worker.test.js`.
 - AI Gateway tên `default`, có bật xác thực (cần `CF_AIG_TOKEN`).
